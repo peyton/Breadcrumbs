@@ -53,7 +53,7 @@
 
 #import <AudioToolbox/AudioToolbox.h>
 
-#pragma mark -
+#define kUpdateInterval 10.0
 
 @interface BreadcrumbViewController()
 - (void)setSessionActiveWithMixing:(BOOL)duckIfOtherAudioIsPlaying;
@@ -133,7 +133,7 @@ static void interruptionListener(void *inClientData, UInt32 inInterruption);
                                                                action:@selector(flipAction:)];
     
     // Log location every ten seconds
-    NSTimer *logTimer = [NSTimer timerWithTimeInterval:10.0 target:self selector:@selector(_logLocation) userInfo:nil repeats:YES];
+    NSTimer *logTimer = [NSTimer timerWithTimeInterval:kUpdateInterval target:self selector:@selector(_updateLocation) userInfo:nil repeats:YES];
     [[NSRunLoop currentRunLoop] addTimer:logTimer forMode:NSRunLoopCommonModes];
 }
 
@@ -191,17 +191,8 @@ static void interruptionListener(void *inClientData, UInt32 inInterruption);
 
 #pragma mark - Logging methods
 
-- (void)_logLocation;
+- (void)_logLocation:(CLLocation *)loc;
 {
-    CLLocation *loc;
-    
-    // Don't do anything if there hasn't been an update
-    if ((loc = self.locationManager.location) == _previousLocation)
-        return;
-    
-    // Store previous location for comparison on the next tick
-    _previousLocation = loc;
-    
     // What to store
     NSString *itemsString = [NSString stringWithFormat:@"%@,%3.8f,%3.8f,%.3f,%.3f,%.3f,%.3f,%.3f\n", [loc.timestamp description], loc.coordinate.latitude, loc.coordinate.longitude, loc.altitude, loc.horizontalAccuracy, loc.verticalAccuracy, loc.speed, loc.course];
     
@@ -236,6 +227,67 @@ static void interruptionListener(void *inClientData, UInt32 inInterruption);
 
 #pragma mark -
 #pragma mark Actions
+
+- (void)_updateLocation;
+{
+    CLLocation *loc;
+    
+    // Don't do anything if there hasn't been an update
+    if ((loc = self.locationManager.location) == _previousLocation)
+        return;
+    
+    // Store previous location for comparison on the next tick
+    _previousLocation = loc;
+
+    // Log
+    [self _logLocation:loc];
+    
+    if (!crumbs)
+    {
+        // This is the first time we're getting a location update, so create
+        // the CrumbPath and add it to the map.
+        //
+        crumbs = [[CrumbPath alloc] initWithCenterCoordinate:loc.coordinate];
+        
+        if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive)
+        {
+            [map addOverlay:crumbs];
+            
+            // On the first location update only, zoom map to user location
+            MKCoordinateRegion region = 
+            MKCoordinateRegionMakeWithDistance(loc.coordinate, 2000, 2000);
+            [map setRegion:region animated:YES];
+        }
+    }
+    else
+    {
+        // This is a subsequent location update.
+        // If the crumbs MKOverlay model object determines that the current location has moved
+        // far enough from the previous location, use the returned updateRect to redraw just
+        // the changed area.
+        //
+        // note: iPhone 3G will locate you using the triangulation of the cell towers.
+        // so you may experience spikes in location data (in small time intervals)
+        // due to 3G tower triangulation.
+        // 
+        MKMapRect updateRect = [crumbs addCoordinate:loc.coordinate];
+        
+        if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive)
+        {
+            if (!MKMapRectIsNull(updateRect))
+            {
+                // There is a non null update rect.
+                // Compute the currently visible map zoom scale
+                MKZoomScale currentZoomScale = (CGFloat)(map.bounds.size.width / map.visibleMapRect.size.width);
+                // Find out the line width at this zoom scale and outset the updateRect by that amount
+                CGFloat lineWidth = MKRoadWidthAtZoomScale(currentZoomScale);
+                updateRect = MKMapRectInset(updateRect, -lineWidth, -lineWidth);
+                // Ask the overlay view to update just the changed area.
+                [crumbView setNeedsDisplayInMapRect:updateRect];
+            }
+        }
+    }
+}
 
 // called when the app is moved to the background (user presses the home button) or to the foreground 
 //
@@ -325,64 +377,6 @@ static void interruptionListener(void *inClientData, UInt32 inInterruption);
 
 #pragma mark -
 #pragma mark MapKit
-
-- (void)locationManager:(CLLocationManager *)manager
-    didUpdateToLocation:(CLLocation *)newLocation
-           fromLocation:(CLLocation *)oldLocation
-{
-    if (newLocation)
-    {
-        if ([self.toggleAudioButton isOn])
-		{
-			[self setSessionActiveWithMixing:YES]; // YES == duck if other audio is playing
-			[self playSound];
-		}
-		
-		// make sure the old and new coordinates are different
-        if ((oldLocation.coordinate.latitude != newLocation.coordinate.latitude) &&
-            (oldLocation.coordinate.longitude != newLocation.coordinate.longitude))
-        {    
-            if (!crumbs)
-            {
-                // This is the first time we're getting a location update, so create
-                // the CrumbPath and add it to the map.
-                //
-                crumbs = [[CrumbPath alloc] initWithCenterCoordinate:newLocation.coordinate];
-                [map addOverlay:crumbs];
-                
-                // On the first location update only, zoom map to user location
-                MKCoordinateRegion region = 
-					MKCoordinateRegionMakeWithDistance(newLocation.coordinate, 2000, 2000);
-                [map setRegion:region animated:YES];
-            }
-            else
-            {
-                // This is a subsequent location update.
-                // If the crumbs MKOverlay model object determines that the current location has moved
-                // far enough from the previous location, use the returned updateRect to redraw just
-                // the changed area.
-                //
-                // note: iPhone 3G will locate you using the triangulation of the cell towers.
-                // so you may experience spikes in location data (in small time intervals)
-                // due to 3G tower triangulation.
-                // 
-                MKMapRect updateRect = [crumbs addCoordinate:newLocation.coordinate];
-                
-                if (!MKMapRectIsNull(updateRect))
-                {
-                    // There is a non null update rect.
-                    // Compute the currently visible map zoom scale
-                    MKZoomScale currentZoomScale = (CGFloat)(map.bounds.size.width / map.visibleMapRect.size.width);
-                    // Find out the line width at this zoom scale and outset the updateRect by that amount
-                    CGFloat lineWidth = MKRoadWidthAtZoomScale(currentZoomScale);
-                    updateRect = MKMapRectInset(updateRect, -lineWidth, -lineWidth);
-                    // Ask the overlay view to update just the changed area.
-                    [crumbView setNeedsDisplayInMapRect:updateRect];
-                }
-            }
-        }
-    }
-}
 
 - (MKOverlayView *)mapView:(MKMapView *)mapView viewForOverlay:(id <MKOverlay>)overlay
 {
